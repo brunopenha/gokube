@@ -19,122 +19,127 @@ import (
 	"archive/zip"
 	"bufio"
 	"compress/gzip"
+	"errors"
+	"fmt"
+	"gopkg.in/cheggaaa/pb.v2"
 	"io"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"os/user"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
-// EnvVar ...
-type EnvVar struct {
-	Name  string
-	Value string
+// GetAppDataHome ...
+func GetAppDataHome() string {
+	return os.Getenv("APPDATA")
 }
 
-// CreateFile ...
-func CreateFile(filePath string) {
-	var _, err = os.Stat(filePath)
-	if os.IsNotExist(err) {
-		var file, err = os.Create(filePath)
-		if err != nil {
-			panic(err)
-		}
-		defer file.Close()
+// GetUserHome ...
+func GetUserHome() string {
+	userHome, err := user.Current()
+	if err != nil {
+		fmt.Println("Error: cannot determine user home directory")
+		os.Exit(1)
 	}
+	return userHome.HomeDir
 }
 
-// CreateDir ...
-func CreateDir(dirPath string) {
+// GetBinDir ...
+func GetBinDir(executable string) string {
+	path, err := exec.LookPath(executable)
+	if err != nil {
+		fmt.Printf("Error: cannot determine %s directory\n", executable)
+		os.Exit(1)
+	}
+	if errors.Is(err, exec.ErrDot) {
+		path, err = os.Getwd()
+		if err != nil {
+			fmt.Printf("Error: cannot determine %s directory\n", executable)
+			os.Exit(1)
+		}
+	} else {
+		path = strings.TrimSuffix(path, string(os.PathSeparator)+"gokube.exe")
+	}
+	return path
+}
+
+// CreateDirs ...
+func CreateDirs(dirPath string) error {
 	// Check if file already exist
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-		err := os.Mkdir(dirPath, 0001)
+		err = os.MkdirAll(dirPath, 0755)
 		if err != nil {
-			panic(err)
+			return err
 		}
 	}
-}
-
-// MoveFile ...
-func MoveFile(oldPath string, newPath string) {
-	err := os.Rename(oldPath, newPath)
-	if err != nil {
-		panic(err)
-	}
-}
-
-// MoveFiles ...
-func MoveFiles(oldPath string, newPath string) {
-	files, err := filepath.Glob(oldPath)
-	if err != nil {
-		panic(err)
-	}
-	for _, f := range files {
-		if err := os.Rename(f, newPath); err != nil {
-			panic(err)
-		}
-	}
-}
-
-func CopyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	if err != nil {
-		return err
-	}
-	return out.Close()
+	return nil
 }
 
 // CleanDir ...
-func CleanDir(dirPath string) {
-	dir, err := ioutil.ReadDir(dirPath)
+func CleanDir(dirPath string) error {
+	entries, err := os.ReadDir(dirPath)
 	if err == nil {
-        for _, e := range dir {
-            err := os.RemoveAll(path.Join([]string{dirPath, e.Name()}...))
-            if err != nil {
-                panic(err)
-            }
-        }
-    }
+		for _, e := range entries {
+			err = os.RemoveAll(path.Join([]string{dirPath, e.Name()}...))
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-// RemoveDir ...
-func RemoveDir(dirPath string) {
+// DeleteDir ...
+func DeleteDir(dirPath string) {
 	err := os.RemoveAll(dirPath)
 	if err != nil {
-		panic(err)
+		fmt.Printf("Warning: cannot remove directory %s: %s", dirPath, err)
 	}
 }
 
-// RemoveFile ...
-func RemoveFile(filePath string) {
-	err := os.RemoveAll(filePath)
-	if err != nil {
-		panic(err)
+func Close(stream io.Closer) {
+	if stream != nil {
+		err := stream.Close()
+		if err != nil {
+			fmt.Printf("Warning: cannot close stream: %s\n", err)
+		}
 	}
 }
 
-// RemoveFiles ...
-func RemoveFiles(filePath string) {
-	files, err := filepath.Glob(filePath)
-	if err != nil {
-		panic(err)
+func CloseFile(file *os.File) {
+	if file != nil {
+		err := file.Close()
+		if err != nil {
+			fmt.Printf("Warning: cannot close file %s: %s\n", file.Name(), err)
+		}
 	}
-	for _, f := range files {
-		if err := os.Remove(f); err != nil {
-			panic(err)
+}
+
+func CloseGZipReader(reader *gzip.Reader) {
+	if reader != nil {
+		err := reader.Close()
+		if err != nil {
+			fmt.Printf("Warning: cannot close reader %s: %s\n", reader.Name, err)
+		}
+	}
+}
+
+func CloseZipReader(reader *zip.ReadCloser) {
+	if reader != nil {
+		err := reader.Close()
+		if err != nil {
+			fmt.Printf("Warning: cannot close reader: %s\n", err)
+		}
+	}
+}
+
+func ClosePBReader(reader *pb.Reader) {
+	if reader != nil {
+		err := reader.Close()
+		if err != nil {
+			fmt.Printf("Warning: cannot close reader: %s\n", err)
 		}
 	}
 }
@@ -144,14 +149,12 @@ func RemoveFiles(filePath string) {
 func Untar(src string, dst string) error {
 
 	file, err := os.Open(src)
-	defer file.Close()
+	defer CloseFile(file)
 	if err != nil {
 		panic(err)
 	}
-	bufio.NewReader(file)
-
 	gzr, err := gzip.NewReader(bufio.NewReader(file))
-	defer gzr.Close()
+	defer CloseGZipReader(gzr)
 	if err != nil {
 		return err
 	}
@@ -162,15 +165,12 @@ func Untar(src string, dst string) error {
 		header, err := tr.Next()
 
 		switch {
-
 		// if no more files are found return
 		case err == io.EOF:
 			return nil
-
 		// return any other error
 		case err != nil:
 			return err
-
 		// if the header is nil, just skip it (not sure how this happens)
 		case header == nil:
 			continue
@@ -179,31 +179,32 @@ func Untar(src string, dst string) error {
 		// the target location where the dir/file should be created
 		target := filepath.Join(dst, header.Name)
 
-		// the following switch could also be done using fi.Mode(), not sure if there
-		// a benefit of using one vs. the other.
-		// fi := header.FileInfo()
-
 		// check the file type
 		switch header.Typeflag {
-
-		// if its a dir and it doesn't exist create it
+		// if it's a dir and it doesn't exist create it
 		case tar.TypeDir:
 			if _, err := os.Stat(target); err != nil {
 				if err := os.MkdirAll(target, 0755); err != nil {
 					return err
 				}
 			}
-
 		// if it's a file create it
 		case tar.TypeReg:
+			if _, err := os.Stat(filepath.Dir(target)); err != nil {
+				if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+					return err
+				}
+			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-
 			// copy over contents
 			if _, err := io.Copy(f, tr); err != nil {
+				return err
+			}
+			err = f.Close()
+			if err != nil {
 				return err
 			}
 		}
@@ -213,13 +214,13 @@ func Untar(src string, dst string) error {
 // Unzip ...
 func Unzip(src string, dest string) error {
 
-	var filenames []string
+	var fileNames []string
 
 	r, err := zip.OpenReader(src)
+	defer CloseZipReader(r)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
 
 	for _, f := range r.File {
 
@@ -227,57 +228,47 @@ func Unzip(src string, dest string) error {
 		if err != nil {
 			return err
 		}
-		defer rc.Close()
 
 		// Store filename/path for returning and using later on
-		fpath := filepath.Join(dest, f.Name)
-		filenames = append(filenames, fpath)
+		fileName := filepath.Join(dest, f.Name)
+		fileNames = append(fileNames, fileName)
 
 		if f.FileInfo().IsDir() {
-
 			// Make Folder
-			os.MkdirAll(fpath, os.ModePerm)
-
+			err = os.MkdirAll(fileName, 0755)
+			if err != nil {
+				return err
+			}
 		} else {
-
 			// Make File
-			if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			if err = os.MkdirAll(filepath.Dir(fileName), 0755); err != nil {
 				return err
 			}
-
-			outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+			outFile, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 			if err != nil {
 				return err
 			}
-
 			_, err = io.Copy(outFile, rc)
-
-			// Close the file without defer to close before next iteration of loop
-			outFile.Close()
-
+			err = outFile.Close()
 			if err != nil {
 				return err
 			}
-
+		}
+		err = rc.Close()
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// GetUserHome ...
-func GetUserHome() string {
-	user, err := user.Current()
-	if err != nil {
-		panic(err)
+// GetValueFromEnv ...
+func GetValueFromEnv(envVar string, defaultValue string) string {
+	var value = os.Getenv(envVar)
+	if len(value) > 0 {
+		fmt.Printf("Using environment variable %s=%s\n", envVar, value)
+	} else {
+		value = defaultValue
 	}
-	return user.HomeDir
-}
-
-// WriteFile ...
-func WriteFile(content string, path string) {
-	d1 := []byte(content)
-	err := ioutil.WriteFile(path, d1, 0644)
-	if err != nil {
-		panic(err)
-	}
+	return value
 }

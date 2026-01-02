@@ -12,6 +12,8 @@ import (
 	"strconv"
 
 	"time"
+	"os"
+	"github.com/gemalto/gokube/pkg/utils"
 )
 
 const (
@@ -21,13 +23,16 @@ const (
 )
 
 var (
-	reColonLine       = regexp.MustCompile(`(.+):\s+(.*)`)
-	reEqualLine       = regexp.MustCompile(`(.+)=(.*)`)
-	reEqualQuoteLine  = regexp.MustCompile(`"(.+)"="(.*)"`)
-	reMachineNotFound = regexp.MustCompile(`Could not find a registered machine named '(.+)'`)
+	reColonLine        = regexp.MustCompile(`(.+):\s+(.*)`)
+	reEqualLine        = regexp.MustCompile(`(.+)=(.*)`)
+	reEqualQuoteLine   = regexp.MustCompile(`"(.+)"="(.*)"`)
+	reMachineNotFound  = regexp.MustCompile(`Could not find a registered machine named '(.+)'`)
+	reSnapshotNotFound = regexp.MustCompile(`Could not find a snapshot named '(.+)'`)
+	reNoSnapshotFound  = regexp.MustCompile("This machine does not have any snapshots")
 
-	ErrMachineNotExist = errors.New("machine does not exist")
-	ErrVBMNotFound     = errors.New("VBoxManage not found. Make sure VirtualBox is installed and VBoxManage is in the path")
+	ErrMachineNotExist  = errors.New("machine does not exist")
+	ErrSnapshotNotExist = errors.New("snapshot does not exist")
+	ErrVBMNotFound      = errors.New("VBoxManage not found. Make sure VirtualBox is installed and VBoxManage is in the path")
 
 	vboxManageCmd = detectVBoxManageCmd()
 )
@@ -51,6 +56,35 @@ func NewVBoxManager() *VBoxCmdManager {
 	return &VBoxCmdManager{
 		runCmd: func(cmd *exec.Cmd) error { return cmd.Run() },
 	}
+}
+
+// CreateDisk create a disk in VBox to be used as swap
+func (v *VBoxCmdManager) CreateDisk(sizeInMB int16, filePath string) error {
+	// Check if the disk already exists
+	if _, err := os.Stat(filePath); err == nil {
+		// Disk already exists, skip the creation
+		return nil
+	} else if !os.IsNotExist(err) {
+		// Some other error occurred while trying to get the file info
+		return err
+	}
+
+	size := fmt.Sprintf("--size=%d", sizeInMB)
+	command := []string{"createmedium", "disk", "--filename", filePath, size, "--format", "VDI"}
+	return v.vbm(command...)
+}
+
+// AttachDisk attach the disk created for swap to the minikube VM
+func (v *VBoxCmdManager) AttachDisk(vmName string, port int, device int, filePath string) error {
+	command := []string{
+		"storageattach", vmName,
+		"--storagectl", "SATA",
+		"--port", fmt.Sprintf("%d", port),
+		"--device", fmt.Sprintf("%d", device),
+		"--type", "hdd",
+		"--medium", filePath,
+	}
+	return v.vbm(command...)
 }
 
 func (v *VBoxCmdManager) vbm(args ...string) error {
@@ -151,4 +185,23 @@ func parseKeyValues(stdOut string, regexp *regexp.Regexp, callback func(key, val
 	}
 
 	return s.Err()
+}
+
+// AddSwapDisk prepare, create, and attach swap disk to minikube VM
+func (v *VBoxCmdManager) AddSwapDisk(swapsize int16) error {
+
+	// Create the disk
+	swapDiskPath := utils.GetUserHome() + string(os.PathSeparator) + ".minikube/machines/minikube/swapdisk.vdi"
+	err := v.CreateDisk(swapsize, swapDiskPath)
+	if err != nil {
+		return fmt.Errorf("cannot create swap disk: %w", err)
+	}
+
+	// Attach the disk to the VM
+	err = v.AttachDisk("minikube", 2, 0, swapDiskPath)
+	if err != nil {
+		return fmt.Errorf("cannot attach swap disk to VM: %w", err)
+	}
+
+	return nil
 }

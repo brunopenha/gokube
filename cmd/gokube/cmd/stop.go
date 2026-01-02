@@ -15,22 +15,41 @@ limitations under the License.
 package cmd
 
 import (
+	"fmt"
+	"github.com/gemalto/gokube/pkg/gokube"
 	"github.com/gemalto/gokube/pkg/minikube"
+	"github.com/gemalto/gokube/pkg/utils"
 	"github.com/spf13/cobra"
 )
 
 // stopCmd represents the stop command
 var stopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stops minikube. This command stops minikube",
-	Long:  "Stops minikube. This command stops minikube",
-	Run:   stopRun,
+	Use:          "stop",
+	Short:        "Stops gokube. This command stops minikube",
+	Long:         "Stops gokube. This command stops minikube",
+	RunE:         stopRun,
+	SilenceUsage: true,
 }
 
 func init() {
-	RootCmd.AddCommand(stopCmd)
+	defaultGokubeQuiet := false
+	if len(utils.GetValueFromEnv("GOKUBE_QUIET", "")) > 0 {
+		defaultGokubeQuiet = true
+	}
+	stopCmd.Flags().BoolVarP(&quiet, "quiet", "q", defaultGokubeQuiet, "Don't display warning message before stopping")
+	rootCmd.AddCommand(stopCmd)
 }
 
-func stopRun(cmd *cobra.Command, args []string) {
-	minikube.Stop()
+func stopRun(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return cmd.Usage()
+	}
+
+	checkLatestVersion()
+
+	if !quiet {
+		gokube.ConfirmStopCommandExecution()
+	}
+	fmt.Println("Stopping minikube VM...")
+	return minikube.Stop()
 }

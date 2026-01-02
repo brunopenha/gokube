@@ -19,77 +19,108 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/gemalto/gokube/pkg/gokube"
 	"github.com/gemalto/gokube/pkg/utils"
 	"gopkg.in/cheggaaa/pb.v2"
 )
 
-// DownloadFromUrl ...
-func DownloadFromUrl(name string, tpl string, version string) int64 {
+type FileMap struct {
+	Src string
+	Dst string
+}
 
-	url := tpl
-
-	if strings.Contains(tpl, "%s") {
-		url = fmt.Sprintf(tpl, version)
-	}
-
-	tokens := strings.Split(url, "/")
-	fileName := tokens[len(tokens)-1]
-
-	// Templates definition: https://github.com/cheggaaa/pb/blob/v2/preset.go
-	var tmpl string
-	//tmpl = `{{ green "` + name + `: " }}{{counters . }} {{bar . "[" "=" ">" "_" "]" | green }} {{percent . }} {{speed . }}`
-	tmpl = `{{ green "` + name + `: " }}{{counters . }} {{bar . | green }} {{percent . }} {{speed . }}`
-
-	utils.CreateDir(gokube.GetTempDir())
-	output, err := os.Create(gokube.GetTempDir() + "/" + fileName)
+func fromUrl(url string, name string, dir string, fileName string) (int64, error) {
+	file, err := os.Create(dir + string(os.PathSeparator) + fileName)
+	defer utils.CloseFile(file)
 	if err != nil {
-		panic(err)
+		return -1, err
 	}
-	defer output.Close()
 
 	response, err := http.Get(url)
+	defer utils.Close(response.Body)
 	if err != nil {
-		panic(err)
+		return -1, err
 	}
-	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		return -1, fmt.Errorf("cannot download %s", url)
+	}
 
-	filesize := response.ContentLength
-	count := int(filesize)
+	count := int(response.ContentLength)
+	tmpl := `{{ yellow "` + name + `: " }}{{counters . }} {{bar . | green }} {{percent . }} {{speed . }}`
 	bar := pb.ProgressBarTemplate(tmpl).Start(count)
-	//bar := pb.StartNew(count)
-	bar.SetWidth(100)
 	defer bar.Finish()
+	bar.SetWidth(100)
 
 	// create proxy reader
 	reader := bar.NewProxyReader(response.Body)
-	n, err := io.Copy(output, reader)
-
-	defer reader.Close()
+	defer utils.ClosePBReader(reader)
+	n, err := io.Copy(file, reader)
 	if err != nil {
-		panic(err)
+		return -1, err
 	}
 
 	var fi os.FileInfo
 	for fi == nil || int(fi.Size()) < count {
-		fi, _ = output.Stat()
+		fi, _ = file.Stat()
 		bar.Increment()
 		time.Sleep(time.Millisecond)
 	}
 
-	tokens = strings.Split(fileName, ".")
+	tokens := strings.Split(fileName, ".")
 	fileType := tokens[len(tokens)-1]
 	switch fileType {
 	case "zip":
-		utils.Unzip(gokube.GetTempDir()+"/"+fileName, gokube.GetTempDir())
+		if err = utils.Unzip(file.Name(), dir); err != nil {
+			return -1, err
+		}
 	case "tgz":
-		utils.Untar(gokube.GetTempDir()+"/"+fileName, gokube.GetTempDir())
+		if err = utils.Untar(file.Name(), dir); err != nil {
+			return -1, err
+		}
 	case "gz":
-		utils.Untar(gokube.GetTempDir()+"/"+fileName, gokube.GetTempDir())
+		if err = utils.Untar(file.Name(), dir); err != nil {
+			return -1, err
+		}
+	}
+	return n, nil
+}
+
+// FromUrl ...
+func FromUrl(urlTpl string, version string, name string, fileMaps []*FileMap, dst string) (int64, error) {
+
+	url := strings.Replace(urlTpl, "%s", version, -1)
+	if version[0:1] == "v" {
+		name = name + " " + version
+	} else {
+		name = name + " v" + version
+	}
+	tokens := strings.Split(url, "/")
+	urlFileName := tokens[len(tokens)-1]
+
+	tempDir, err := os.MkdirTemp(os.TempDir(), "*")
+	defer utils.DeleteDir(tempDir)
+
+	n, err := fromUrl(url, name, tempDir, urlFileName)
+	if err != nil {
+		return -1, err
 	}
 
-	return n
+	for _, fileMap := range fileMaps {
+		fileDst := dst + string(os.PathSeparator) + fileMap.Dst
+		if _, err := os.Stat(filepath.Dir(fileDst)); err != nil {
+			if err := os.MkdirAll(filepath.Dir(fileDst), 0755); err != nil {
+				return -1, err
+			}
+		}
+		fileSrc := tempDir + string(os.PathSeparator) + fileMap.Src
+		err = os.Rename(fileSrc, fileDst)
+		if err != nil {
+			return -1, err
+		}
+	}
+
+	return n, nil
 }

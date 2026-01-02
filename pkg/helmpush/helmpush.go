@@ -12,7 +12,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package helmspray
+package helmpush
 
 import (
 	"github.com/gemalto/gokube/pkg/download"
@@ -22,21 +22,21 @@ import (
 )
 
 const (
-	DEFAULT_URL           = "https://github.com/ThalesGroup/helm-spray/releases/download/%s/helm-spray-windows-amd64.tar.gz"
-	LOCAL_EXECUTABLE_NAME = "helm-spray.exe"
+	DEFAULT_URL           = "https://github.com/chartmuseum/helm-push/releases/download/v%s/helm-push_%s_windows_amd64.tar.gz"
+	LOCAL_EXECUTABLE_NAME = "helm-cm-push.exe"
 )
 
 // InstallPlugin ...
-func InstallPlugin(helmSprayURI string, helmSprayVersion string) error {
+func InstallPlugin(helmPushURI string, helmPushVersion string) error {
 	localFile := utils.GetAppDataHome() + string(os.PathSeparator) +
 		"helm" + string(os.PathSeparator) +
 		"plugins" + string(os.PathSeparator) +
-		"helm-spray" + string(os.PathSeparator) +
+		"helm-push" + string(os.PathSeparator) +
 		LOCAL_EXECUTABLE_NAME
 	if _, err := os.Stat(localFile); os.IsNotExist(err) {
 		fileMap1 := &download.FileMap{Src: "bin" + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME, Dst: "bin" + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME}
 		fileMap2 := &download.FileMap{Src: "plugin.yaml", Dst: "plugin.yaml"}
-		_, err = download.FromUrl(helmSprayURI, helmSprayVersion, "helm-spray", []*download.FileMap{fileMap1, fileMap2}, filepath.Dir(localFile))
+		_, err = download.FromUrl(helmPushURI, helmPushVersion, "helm-push", []*download.FileMap{fileMap1, fileMap2}, filepath.Dir(localFile))
 		if err != nil {
 			return err
 		}
@@ -49,6 +49,6 @@ func DeletePlugin() error {
 	localDir := utils.GetAppDataHome() + string(os.PathSeparator) +
 		"helm" + string(os.PathSeparator) +
 		"plugins" + string(os.PathSeparator) +
-		"helm-spray" + string(os.PathSeparator)
+		"helm-push" + string(os.PathSeparator)
 	return os.RemoveAll(localDir)
 }

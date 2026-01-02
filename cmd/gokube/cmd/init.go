@@ -14,251 +14,399 @@ limitations under the License.
 
 package cmd
 
+// TODO manage vbox time sync (VBoxManage guestproperty set default "/VirtualBox/GuestAdd/VBoxService/--timesync-set-threshold" 1000)
+
 import (
 	"fmt"
-	"github.com/gemalto/gokube/pkg/gokube"
-	"github.com/gemalto/gokube/pkg/helmspray"
-	"github.com/gemalto/gokube/pkg/stern"
+	"github.com/gemalto/gokube/internal/util"
+	"github.com/gemalto/gokube/pkg/docker"
 	"github.com/gemalto/gokube/pkg/utils"
-	"log"
+	"github.com/gemalto/gokube/pkg/virtualbox"
+	"github.com/spf13/viper"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"net/http"
 
-	"github.com/gemalto/gokube/pkg/docker"
+	"github.com/coreos/go-semver/semver"
+	"github.com/gemalto/gokube/pkg/gokube"
 	"github.com/gemalto/gokube/pkg/helm"
 	"github.com/gemalto/gokube/pkg/kubectl"
 	"github.com/gemalto/gokube/pkg/minikube"
-
 	"github.com/spf13/cobra"
+	"os/exec"
 )
 
-const (
-	NGINX_INGRESS_APP_VERSION  = "0.23.0"
-	TPROXY_CHART_VERSION       = "1.0.0"
-	DEFAULT_KUBERNETES_VERSION = "v1.10.13"
-	DEFAULT_KUBECTL_VERSION    = "v1.14.6"
-	DEFAULT_MINIKUBE_VERSION   = "v1.3.1"
-)
-
-var minikubeURL string
-var minikubeVersion string
-var dockerVersion string
-var kubernetesVersion string
-var kubectlVersion string
-var helmVersion string
-var helmSprayVersion string
-var sternVersion string
 var memory int16
 var cpus int16
+var swap int16
+var enableSwap bool
 var disk string
 var checkIP string
+var ipCheckNeeded bool
 var insecureRegistry string
 var httpProxy string
 var httpsProxy string
 var noProxy string
-var transparentProxy bool
-var upgrade bool
-var clean bool
-var imageCache bool
-var imageCacheAlternateRepo string
+var askForClean bool
 var miniappsRepo string
-var ingressController bool
 var dnsProxy bool
 var hostDNSResolver bool
+var keepVM bool
+var dnsDomain string
 
 // initCmd represents the init command
 var initCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Initializes gokube. This command downloads dependencies: minikube + helm + kubectl + docker + stern and creates the virtual machine (minikube)",
-	Long:  "Initializes gokube. This command downloads dependencies: minikube + helm + kubectl + docker + stern and creates the virtual machine (minikube)",
-	Run:   initRun,
+	Use:          "init",
+	Short:        "Initializes gokube. This command downloads dependencies: minikube + helm + kubectl + docker + stern + k9s and creates a minikube VM",
+	Long:         "Initializes gokube. This command downloads dependencies: minikube + helm + kubectl + docker + stern + k9s and creates a minikube VM",
+	RunE:         initRun,
+	SilenceUsage: true,
 }
 
 func init() {
-	var defaultKubernetesVersion = os.Getenv("KUBERNETES_VERSION")
-	if len(defaultKubernetesVersion) == 0 {
-		defaultKubernetesVersion = DEFAULT_KUBERNETES_VERSION
+	defaultVMMemory, _ := strconv.Atoi(utils.GetValueFromEnv("MINIKUBE_MEMORY", strconv.Itoa(DEFAULT_MINIKUBE_MEMORY)))
+	defaultVMCPUs, _ := strconv.Atoi(utils.GetValueFromEnv("MINIKUBE_CPUS", strconv.Itoa(DEFAULT_MINIKUBE_CPUS)))
+	defaultVMSwap, _ := strconv.Atoi(utils.GetValueFromEnv("MINIKUBE_SWAP", strconv.Itoa(DEFAULT_MINIKUBE_SWAP)))
+	enableSwap = false
+	if defaultVMSwap != 0 {
+		enableSwap = true
 	}
-	var defaultKubectlVersion = os.Getenv("KUBERNETES_VERSION")
-	if len(defaultKubectlVersion) == 0 {
-		defaultKubectlVersion = DEFAULT_KUBECTL_VERSION
+	defaultGokubeQuiet := false
+	if len(utils.GetValueFromEnv("GOKUBE_QUIET", "")) > 0 {
+		defaultGokubeQuiet = true
 	}
-	var defaultMinikubeVersion = os.Getenv("MINIKUBE_VERSION")
-	if len(defaultMinikubeVersion) == 0 {
-		defaultMinikubeVersion = DEFAULT_MINIKUBE_VERSION
-	}
-	initCmd.Flags().StringVarP(&minikubeURL, "minikube-url", "", "https://storage.googleapis.com/minikube/releases/%s/minikube-windows-amd64.exe", "The URL to download minikube")
-	initCmd.Flags().StringVarP(&minikubeVersion, "minikube-version", "", defaultMinikubeVersion, "The minikube version")
-	initCmd.Flags().StringVarP(&dockerVersion, "docker-version", "", "18.09.0", "The docker version")
-	initCmd.Flags().StringVarP(&kubernetesVersion, "kubernetes-version", "", defaultKubernetesVersion, "The kubernetes version")
-	initCmd.Flags().StringVarP(&kubectlVersion, "kubectl-version", "", defaultKubectlVersion, "The kubectl version")
-	initCmd.Flags().StringVarP(&helmVersion, "helm-version", "", "v2.13.1", "The helm version")
-	initCmd.Flags().StringVarP(&helmSprayVersion, "helm-spray-version", "", "v3.4.4", "The helm version")
-	initCmd.Flags().StringVarP(&sternVersion, "stern-version", "", "1.10.0", "The stern version")
-	initCmd.Flags().Int16VarP(&memory, "memory", "", int16(8192), "Amount of RAM allocated to the minikube VM in MB")
-	initCmd.Flags().Int16VarP(&cpus, "cpus", "", int16(4), "Number of CPUs allocated to the minikube VM")
-	initCmd.Flags().StringVarP(&disk, "disk", "", "20g", "Disk size allocated to the minikube VM. Format: <number>[<unit>], where unit = b, k, m or g")
-	initCmd.Flags().StringVarP(&checkIP, "check-ip", "", "192.168.99.100", "Checks if minikube VM allocated IP matches the provided one (0.0.0.0 means no check)")
+	loadURLVersionsFromEnv()
+	initCmd.Flags().StringVarP(&kubernetesVersion, "kubernetes-version", "", utils.GetValueFromEnv("KUBERNETES_VERSION", DEFAULT_KUBERNETES_VERSION), "The kubernetes version")
+	initCmd.Flags().StringVarP(&containerRuntime, "container-runtime", "", utils.GetValueFromEnv("MINIKUBE_CONTAINER_RUNTIME", DEFAULT_MINIKUBE_CONTAINER_RUNTIME), "Minikube container runtime (docker, cri-o, containerd)")
+	initCmd.Flags().BoolVarP(&askForUpgrade, "upgrade", "u", false, "Upgrade gokube (download and setup docker, minikube, kubectl and helm)")
+	initCmd.Flags().BoolVarP(&askForClean, "clean", "c", false, "Clean gokube (remove docker, minikube, kubectl and helm working directories)")
+	initCmd.Flags().Int16VarP(&memory, "memory", "", int16(defaultVMMemory), "Amount of RAM allocated to the minikube VM in MB")
+	initCmd.Flags().Int16VarP(&cpus, "cpus", "", int16(defaultVMCPUs), "Number of CPUs allocated to the minikube VM")
+	initCmd.Flags().Int16VarP(&swap, "swap", "", int16(defaultVMSwap), "Amount of SWAP allocated to the minikube VM in MB")
+	initCmd.Flags().StringVarP(&disk, "disk", "", utils.GetValueFromEnv("MINIKUBE_DISK", DEFAULT_MINIKUBE_DISK), "Disk size allocated to the minikube VM. Format: <number>[<unit>], where unit = b, k, m or g")
+	initCmd.Flags().StringVarP(&checkIP, "check-ip", "", utils.GetValueFromEnv("GOKUBE_CHECK_IP", DEFAULT_GOKUBE_CHECK_IP), "Checks if minikube VM allocated IP matches the provided one (0.0.0.0 means no check)")
 	initCmd.Flags().StringVarP(&insecureRegistry, "insecure-registry", "", os.Getenv("INSECURE_REGISTRY"), "Insecure Docker registries to pass to the Docker daemon. The default service CIDR range will automatically be added.")
 	initCmd.Flags().StringVarP(&httpProxy, "http-proxy", "", os.Getenv("HTTP_PROXY"), "HTTP proxy variable for docker engine in minikube VM")
 	initCmd.Flags().StringVarP(&httpsProxy, "https-proxy", "", os.Getenv("HTTPS_PROXY"), "HTTPS proxy variable for docker engine in minikube VM")
 	initCmd.Flags().StringVarP(&noProxy, "no-proxy", "", os.Getenv("NO_PROXY"), "No proxy variable for docker engine in minikube VM")
-	initCmd.Flags().BoolVarP(&transparentProxy, "transparent-proxy", "", false, "Manage HTTP proxy connections with transparent proxy, implies --image-cache")
-	initCmd.Flags().BoolVarP(&upgrade, "upgrade", "u", false, "Upgrade gokube (download and setup docker, minikube, kubectl and helm)")
-	initCmd.Flags().BoolVarP(&clean, "clean", "c", false, "Clean gokube (remove docker, minikube, kubectl and helm working directories)")
-	initCmd.Flags().BoolVarP(&imageCache, "image-cache", "", true, "Download docker images in cache before pulling them in minikube")
-	initCmd.Flags().StringVarP(&imageCacheAlternateRepo, "image-cache-alternate-repo", "", os.Getenv("ALTERNATE_REPO"), "Alternate docker repo used to download images in cache")
-	initCmd.Flags().StringVarP(&miniappsRepo, "miniapps-repo", "", "https://gemalto.github.io/miniapps", "Helm repository for miniapps")
-	initCmd.Flags().BoolVarP(&ingressController, "ingress-controller", "", false, "Deploy ingress controller")
-	initCmd.Flags().BoolVarP(&dnsProxy, "dns-proxy", "", false, "Use Virtualbox NAT DNS proxy (could be instable)")
-	initCmd.Flags().BoolVarP(&hostDNSResolver, "host-dns-resolver", "", false, "Use Virtualbox NAT DNS host resolver (could be instable)")
-	RootCmd.AddCommand(initCmd)
+	initCmd.Flags().StringVarP(&dnsDomain, "dns-domain", "", utils.GetValueFromEnv("MINIKUBE_DNS_DOMAIN", DEFAULT_MINIKUBE_DNS_DOMAIN), "Minikube cluster DNS domain name")
+	initCmd.Flags().BoolVarP(&dnsProxy, "dns-proxy", "", false, "Use Virtualbox NAT DNS proxy (could be unstable)")
+	initCmd.Flags().BoolVarP(&hostDNSResolver, "host-dns-resolver", "", false, "Use Virtualbox NAT DNS host resolver (could be unstable)")
+	initCmd.Flags().BoolVarP(&quiet, "quiet", "q", defaultGokubeQuiet, "Don't display warning message before initializing")
+	initCmd.Flags().BoolVar(&keepVM, "keep-vm", false, "Keep minikube VM as it is (don't delete/recreate)")
+	initCmd.Flags().BoolVar(&force, "force", false, "Force minikube to perform possibly dangerous operations")
+	rootCmd.AddCommand(initCmd)
 }
 
-// Because of https://github.com/google/go-containerregistry/issues/119, we cannot directly cache images from quay.io repository. Temporary fix is to pull the image elsewhere (docker.io) and tag it again with quay.io
-func cache(originalImagePath string, alternateImagePath string, imageName string, dockerEnv []utils.EnvVar) {
-	var originalImage = ""
-	if originalImagePath != "" {
-		originalImage = originalImagePath + "/" + imageName
-	} else {
-		originalImage = imageName
-	}
-	if imageCacheAlternateRepo != "" && strings.HasPrefix(originalImagePath, "quay.io") {
-		var alternateImage = alternateImagePath + "/" + imageName
-		minikube.Cache(alternateImage)
-		docker.TagImage(alternateImage, originalImage, dockerEnv)
-		docker.RemoveImage(alternateImage, dockerEnv)
-	} else {
-		minikube.Cache(originalImage)
-	}
-}
-
-func initRun(cmd *cobra.Command, args []string) {
-
-	if len(args) > 0 {
-		log.Fatalln("usage: gokube init")
-	}
-
-	// TODO add manifest to ask for admin rights
-	fmt.Println("Deleting previous minikube VM...")
-	minikube.Delete()
-	//  Does not work well with VB6 and not yet tested with VB5
-	//	fmt.Println("Deleting host-only network used by minikube...")
-	//	virtualbox.PurgeHostOnlyNetwork()
-
-	if clean {
-		fmt.Println("Deleting gokube working directories...")
-		minikube.DeleteWorkingDirectory()
-		helm.DeleteWorkingDirectory()
-		kubectl.DeleteWorkingDirectory()
-		docker.DeleteWorkingDirectory()
-		docker.InitWorkingDirectory()
-	}
-	if upgrade {
-		fmt.Println("Downloading gokube dependencies...")
-		minikube.DeleteExecutable()
-		minikube.DownloadExecutable(gokube.GetBinDir(), minikubeURL, minikubeVersion)
-		helm.DeleteExecutable()
-		helm.DownloadExecutable(gokube.GetBinDir(), helmVersion)
-		docker.DeleteExecutable()
-		docker.DownloadExecutable(gokube.GetBinDir(), dockerVersion)
-		kubectl.DeleteExecutable()
-		kubectl.DownloadExecutable(gokube.GetBinDir(), kubectlVersion)
-		stern.DeleteExecutable()
-		stern.DownloadExecutable(gokube.GetBinDir(), sternVersion)
-	}
-
-	if transparentProxy {
-		imageCache = true
-	}
-
-	// Create virtual machine (minikube)
-	minikube.Start(memory, cpus, disk, transparentProxy, httpProxy, httpsProxy, noProxy, insecureRegistry, kubernetesVersion, imageCache, dnsProxy, hostDNSResolver)
-	// Disable notification for updates
-	minikube.ConfigSet("WantUpdateNotification", "false")
-	// Enable dashboard
-	minikube.ConfigSet("dashboard", "true")
-	// Checks minikube IP
-	var minikubeIP = minikube.Ip()
-	if strings.Compare("0.0.0.0", checkIP) != 0 && strings.Compare(checkIP, minikubeIP) != 0 {
-		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!")
-		log.Println("!!!!!!!! CAUTION !!!!!!!!")
-		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!")
-		log.Fatalf("Minikube IP (%s) does not match expected IP (%s), VM post-installation process aborted", minikubeIP, checkIP)
-	}
-
-	if imageCache {
-		fmt.Println("Caching additional docker images...")
-		dockerEnv := minikube.DockerEnv()
-
-		// Put needed images in cache (Helm)
-		cache("gcr.io/kubernetes-helm", imageCacheAlternateRepo, "tiller:"+helmVersion, dockerEnv)
-
-		if ingressController {
-			// Put needed images in cache (Nginx ingress controller)
-			cache("quay.io/kubernetes-ingress-controller", imageCacheAlternateRepo, "nginx-ingress-controller:"+NGINX_INGRESS_APP_VERSION, dockerEnv)
-			cache("gcr.io/google_containers", imageCacheAlternateRepo, "defaultbackend:1.4", dockerEnv)
-		}
-
-		if transparentProxy && httpProxy != "" && httpsProxy != "" {
-			// Put needed images in cache (any-proxy)
-			cache("", imageCacheAlternateRepo, "alpine:3.8", dockerEnv)
-			cache("", imageCacheAlternateRepo, "cvila84/any-proxy:1.0.1", dockerEnv)
-		}
-	}
-
-	// Switch context to minikube for kubectl and helm
-	kubectl.ConfigUseContext("minikube")
-
-	// Install helm
-	fmt.Println("Initializing helm...")
-	helm.Init()
-
-	// Add helm repository
-	helm.RepoAdd("miniapps", miniappsRepo)
-	helm.RepoUpdate()
-
-	if upgrade {
-		// Add helm spray plugin
-		helmspray.DeletePlugin()
-		helmspray.InstallPlugin(helmSprayVersion)
-	}
-
-	if ingressController {
-		// Deploy ingress controller
-		fmt.Println("Deploying ingress controller...")
-		minikube.AddonsEnable("ingress")
-		time.Sleep(60 * time.Second)
-		kubectl.Patch("kube-system", "deploy", "nginx-ingress-controller", "{\"spec\": {\"template\": {\"spec\": {\"hostNetwork\": true}}}}")
-		//	helm.UpgradeWithConfiguration("nginx", "kube-system", "controller.hostNetwork=true", "stable/nginx-ingress", NGINX_INGRESS_CHART_VERSION)
-	}
-
-	if transparentProxy && httpProxy != "" && httpsProxy != "" {
-		// Deploy transparent proxy
-		fmt.Println("Installing transparent proxy...")
-		helm.UpgradeWithConfiguration("any-proxy", "kube-system", "global.httpProxy="+httpProxy+",global.httpsProxy="+httpsProxy, "miniapps/any-proxy", TPROXY_CHART_VERSION)
-	}
-
-	// Patch kubernetes-dashboard to expose it on nodePort 30000
-	fmt.Print("Exposing kubernetes dashboard...")
-	for n := 1; n < 12; n++ {
-		var dashboardService = kubectl.GetObject("kube-system", "svc", "kubernetes-dashboard")
-		if len(dashboardService) > 0 {
-			fmt.Println()
-			kubectl.Patch("kube-system", "svc", "kubernetes-dashboard", "{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":80,\"protocol\":\"TCP\",\"targetPort\":9090,\"nodePort\":30000}]}}")
+func resetVBLease(hostOnlyCIDR string) error {
+	// VB6 persists DHCP leases which prevent minikube to get the expected 192.168.99.100 IP address
+	// Wait 5 seconds to make sure DHCP leases files are unlocked following VM deletion
+	// TODO add manifest to ask for admin rights (when we will need to remove host-only network)
+	fmt.Print("Resetting host-only network used by minikube...")
+	var err error
+	for n := 1; n < 3; n++ {
+		time.Sleep(5 * time.Second)
+		err = virtualbox.ResetHostOnlyNetworkLeases(hostOnlyCIDR, verbose)
+		if err == nil {
 			break
 		} else {
 			fmt.Print(".")
-			time.Sleep(10 * time.Second)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("cannot reset host-only network: %w", err)
+	} else {
+		fmt.Println()
+		return nil
+	}
+}
+
+func setupMiniappsHelmRepository() error {
+	err := helm.RepoAdd("miniapps", miniappsRepo)
+	if err != nil {
+		return fmt.Errorf("cannot add miniapps repo: %w", err)
+	}
+	err = helm.RepoUpdate()
+	if err != nil {
+		return fmt.Errorf("cannot update helm repositories: %w", err)
+	}
+	return nil
+}
+
+func installChartMuseum(localRepoIp string) error {
+	err := helm.RepoAdd("chartmuseum", "https://chartmuseum.github.io/charts")
+	if err != nil {
+		return fmt.Errorf("cannot add chartmuseum repo: %w", err)
+	}
+	err = helm.RepoUpdate()
+	if err != nil {
+		return fmt.Errorf("cannot update helm repositories: %w", err)
+	}
+
+	// Install or Upgrade the ChartMuseum
+	err = helm.Upgrade("chartmuseum/chartmuseum", "", "chartmuseum", "kube-system",
+		"env.open.DISABLE_API=false,env.open.ALLOW_OVERWRITE=true,service.type=NodePort,service.nodePort=32767", "")
+	if err != nil {
+		return fmt.Errorf("cannot install chartmuseum: %w", err)
+	}
+
+	fmt.Printf("Waiting for chartmuseum to be ready...\n")
+
+	retries := 50
+	waitBeforeRetry := 5
+
+	for n := 1; n <= retries; n++ {
+		// Check if ChartMuseum service is ready
+		ready, err := isChartMuseumReady(localRepoIp, 32767)
+		if err == nil && ready {
+			fmt.Println("ChartMuseum is ready.")
+			break
+		} else {
+			fmt.Print(".")
+			if n == retries {
+				fmt.Printf("\nWarning: chartmuseum is not ready after %ds, which likely means its installation failed\n", retries*waitBeforeRetry)
+			} else {
+				time.Sleep(time.Duration(waitBeforeRetry) * time.Second)
+			}
 		}
 	}
 
-	fmt.Println("\ngokube has been installed.")
-	if !imageCache {
-		fmt.Println("Now, you need more or less 10 minutes for running pods...")
+	err = helm.RepoAdd("minikube", "http://"+localRepoIp+":32767")
+	if err != nil {
+		fmt.Printf("Warning: cannot add minikube repo: %s\n", err)
 	}
-	fmt.Println("\nTo verify that pods are running, execute:")
-	fmt.Println("> kubectl get pods --all-namespaces")
-	fmt.Println("")
+	err = helm.RepoUpdate()
+	if err != nil {
+		return fmt.Errorf("cannot update helm repositories: %w", err)
+	}
+	return nil
+}
+
+// Function to check if ChartMuseum is ready
+func isChartMuseumReady(ip string, port int) (bool, error) {
+	url := fmt.Sprintf("http://%s:%d/index.yaml", ip, port)
+	resp, err := http.Get(url)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusOK, nil
+}
+
+func exposeDashboard(port int) error {
+	for n := 1; n <= 12; n++ {
+		dashboardService, err := kubectl.Get("kubernetes-dashboard", "svc", "kubernetes-dashboard", "")
+		if err != nil {
+			return fmt.Errorf("cannot get K8S kubernetes-dashboard service: %w", err)
+		}
+		if len(dashboardService) > 0 {
+			fmt.Println()
+			patchPayload := fmt.Sprintf("{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":80,\"protocol\":\"TCP\",\"targetPort\":9090,\"nodePort\":%d}]}}", port)
+			err = kubectl.Patch("kubernetes-dashboard", "svc", "kubernetes-dashboard", patchPayload)
+			if err != nil {
+				return fmt.Errorf("cannot patch K8S kubernetes-dashboard service: %w", err)
+			}
+			break
+		} else {
+			fmt.Print(".")
+			if n == 12 {
+				fmt.Printf("\nWarning: kubernetes-dashboard is not present after 60s, which probably means its installation failed\n")
+			} else {
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}
+	return nil
+}
+
+func initRun(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return cmd.Usage()
+	}
+
+	checkLatestVersion()
+
+	err := gokube.ReadConfig(verbose)
+	if err != nil {
+		return fmt.Errorf("cannot read gokube configuration file: %w", err)
+	}
+	gokubeVersion = viper.GetString("gokube-version")
+	if len(gokubeVersion) == 0 {
+		gokubeVersion = "0.0.0"
+	}
+
+	// Force clean & upgrade if persisted gokube-version is lower than the current one
+	if semver.New(gokubeVersion).Compare(*semver.New(GOKUBE_VERSION)) < 0 {
+		fmt.Println("Warning: this version of gokube is launched for the first time, forcing clean & upgrade...")
+		gokubeVersion = GOKUBE_VERSION
+		askForClean = true
+		askForUpgrade = true
+	}
+
+	if !askForUpgrade {
+		checkMinimumRequirements()
+	}
+
+	ipCheckNeeded = strings.Compare("0.0.0.0", checkIP) != 0
+
+	if askForClean && keepVM {
+		fmt.Println("Error: Cannot keep VM while cleaning gokube")
+		os.Exit(1)
+	}
+
+	// Warn user with pre-requisites
+	if ipCheckNeeded && !quiet && !keepVM {
+		gokube.ConfirmInitCommandExecution()
+	}
+
+	startTime := time.Now()
+
+	if !keepVM {
+		fmt.Println("Deleting previous minikube VM...")
+		err := minikube.Delete()
+		if err != nil {
+			fmt.Printf("Warning: cannot delete previous minikube VM: %s\n", err)
+		}
+		if ipCheckNeeded {
+			err = resetVBLease(DEFAULT_GOKUBE_CIDR)
+			if err != nil {
+				return fmt.Errorf("cannot delete previous minikube VM: %w", err)
+			}
+		}
+	}
+
+	if askForClean {
+		fmt.Println("Deleting gokube dependencies working directory...")
+		_ = minikube.DeleteWorkingDirectory()
+		_ = kubectl.DeleteWorkingDirectory()
+		_ = docker.DeleteWorkingDirectory()
+		_ = docker.InitWorkingDirectory()
+		_ = helm.DeleteWorkingDirectory()
+	} else if !keepVM {
+		_ = helm.ResetWorkingDirectory()
+	}
+
+	if askForUpgrade {
+		fmt.Println("Upgrading gokube dependencies...")
+		err = upgradeDependencies()
+		if err != nil {
+			return err
+		}
+	}
+
+	if !keepVM {
+		// Disable notification for updates
+		_ = minikube.ConfigSet("WantUpdateNotification", "false")
+
+		// Create virtual machine (minikube)
+		fmt.Printf("Creating minikube VM with kubernetes %s...\n", kubernetesVersion)
+		err := minikube.Start(memory, cpus, disk, httpProxy, httpsProxy, noProxy, insecureRegistry, kubernetesVersion, true, dnsProxy, hostDNSResolver, dnsDomain, containerRuntime, force, verbose)
+		if err != nil {
+			return fmt.Errorf("cannot start minikube VM: %w", err)
+		}
+
+        // Create & attach swap drive to minikube
+        if enableSwap {
+            fmt.Println("Creating & attaching swap drive to minikube VM...")
+            vboxManager := virtualbox.NewVBoxManager()
+            err = vboxManager.AddSwapDisk(swap)
+            if err != nil {
+                fmt.Printf("Warning: cannot create & attach swap drive to minikube VM: %s\n", err)
+            }
+        }
+
+		// Enable dashboard
+		err = minikube.AddonsEnable("dashboard")
+		if err != nil {
+			return fmt.Errorf("cannot enable dashboard minikube add-on: %w", err)
+		}
+
+		minikubeIP, err := minikube.Ip()
+		if err != nil {
+			return fmt.Errorf("cannot get minikube VM IP address: %w", err)
+		}
+		// Checks minikube IP
+		if ipCheckNeeded {
+			if strings.Compare(checkIP, minikubeIP) != 0 {
+				fmt.Printf("\nError: minikube IP (%s) does not match expected IP (%s), VM post-installation process aborted\n", minikubeIP, checkIP)
+				os.Exit(1)
+			}
+		}
+
+		// Switch context to minikube for kubectl and helm
+		err = kubectl.ConfigUseContext("minikube")
+		if err != nil {
+			return fmt.Errorf("cannot switch K8S context to minikube: %w", err)
+		}
+
+		fmt.Println("Installing ChartMuseum...")
+		err = installChartMuseum(minikubeIP)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println("Configuring miniapps repository...")
+		err = setupMiniappsHelmRepository()
+		if err != nil {
+			return err
+		}
+
+		// Patch kubernetes-dashboard to expose it on nodePort 30000
+		fmt.Print("Exposing kubernetes dashboard to nodeport 30000...")
+		err = exposeDashboard(30000)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	if askForUpgrade {
+		fmt.Println("Upgrading helm plugins...")
+		err := upgradeHelmPlugins()
+		if err != nil {
+			return err
+		}
+	}
+
+	// Keep kubernetes version in a persistent file to remember the right kubernetes version to set for (re)start command
+	err = gokube.WriteConfig(gokubeVersion, kubernetesVersion, containerRuntime)
+	if err != nil {
+		return fmt.Errorf("cannot write gokube configuration: %w", err)
+	}
+
+    // Format & enable swap drive in minikube VM
+    if enableSwap {
+        fmt.Println("Formatting & enabling swap drive in minikube VM...")
+	    err = addSwapToMinikube()
+	    if err != nil {
+		    fmt.Printf("Warning: cannot format/enable swap drive in minikube VM: %s\n", err)
+	    }
+    }
+
+	fmt.Printf("\ngokube init completed in %s\n", util.Duration(time.Since(startTime)))
+	return nil
+}
+
+func addSwapToMinikube() error {
+
+	// Add swap file commands
+	swapCmds := []string{
+		"sudo mkswap /dev/sdb",
+		"sudo swapon /dev/sdb",
+		"echo '/dev/sdb none swap defaults 0 0' | sudo tee -a /etc/fstab",
+	}
+
+	// Execute each command
+	for _, cmd := range swapCmds {
+		sshCmd := exec.Command("minikube", "ssh", cmd)
+		err := sshCmd.Run()
+		if err != nil {
+			return fmt.Errorf("error running command '%s': %w", cmd, err)
+		}
+	}
+
+	return nil
 }

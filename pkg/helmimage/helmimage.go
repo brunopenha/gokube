@@ -12,7 +12,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package helmspray
+package helmimage
 
 import (
 	"github.com/gemalto/gokube/pkg/download"
@@ -22,21 +22,22 @@ import (
 )
 
 const (
-	DEFAULT_URL           = "https://github.com/ThalesGroup/helm-spray/releases/download/%s/helm-spray-windows-amd64.tar.gz"
-	LOCAL_EXECUTABLE_NAME = "helm-spray.exe"
+	DEFAULT_URL           = "https://github.com/ThalesGroup/helm-image/releases/download/%s/helm-image-windows-amd64.tar.gz"
+	LOCAL_EXECUTABLE_NAME = "helm-image.exe"
 )
 
 // InstallPlugin ...
-func InstallPlugin(helmSprayURI string, helmSprayVersion string) error {
+func InstallPlugin(helmImageURI string, helmImageVersion string) error {
 	localFile := utils.GetAppDataHome() + string(os.PathSeparator) +
 		"helm" + string(os.PathSeparator) +
 		"plugins" + string(os.PathSeparator) +
-		"helm-spray" + string(os.PathSeparator) +
+		"helm-image" + string(os.PathSeparator) +
 		LOCAL_EXECUTABLE_NAME
 	if _, err := os.Stat(localFile); os.IsNotExist(err) {
 		fileMap1 := &download.FileMap{Src: "bin" + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME, Dst: "bin" + string(os.PathSeparator) + LOCAL_EXECUTABLE_NAME}
-		fileMap2 := &download.FileMap{Src: "plugin.yaml", Dst: "plugin.yaml"}
-		_, err = download.FromUrl(helmSprayURI, helmSprayVersion, "helm-spray", []*download.FileMap{fileMap1, fileMap2}, filepath.Dir(localFile))
+		fileMap2 := &download.FileMap{Src: "bin" + string(os.PathSeparator) + "containerd.exe", Dst: "bin" + string(os.PathSeparator) + "containerd.exe"}
+		fileMap3 := &download.FileMap{Src: "plugin.yaml", Dst: "plugin.yaml"}
+		_, err = download.FromUrl(helmImageURI, helmImageVersion, "helm-image", []*download.FileMap{fileMap1, fileMap2, fileMap3}, filepath.Dir(localFile))
 		if err != nil {
 			return err
 		}
@@ -46,9 +47,9 @@ func InstallPlugin(helmSprayURI string, helmSprayVersion string) error {
 
 // DeletePlugin ...
 func DeletePlugin() error {
-	localDir := utils.GetAppDataHome() + string(os.PathSeparator) +
+	localFile := utils.GetAppDataHome() + string(os.PathSeparator) +
 		"helm" + string(os.PathSeparator) +
 		"plugins" + string(os.PathSeparator) +
-		"helm-spray" + string(os.PathSeparator)
-	return os.RemoveAll(localDir)
+		"helm-image" + string(os.PathSeparator)
+	return os.RemoveAll(localFile)
 }
